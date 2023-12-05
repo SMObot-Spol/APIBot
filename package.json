@@ -1,0 +1,20 @@
+{
+  "name": "discord.js-apollo-api",
+  "version": "1.0.0",
+  "description": "Discord.js Bot that interacts with the Apollo API using the Nodeactyl package.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Alecz R. - Sparked Host",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.0.3",
+    "nodeactyl": "^3.3.0",
+    "socket.io-client": "^4.7.2",
+    "websocket": "^1.0.34",
+    "ws": "^8.14.2"
+  }
+}
