@@ -1,298 +1,192 @@
-// Load env file and require the fs module
-const fs = require("node:fs");
-const path = require("node:path");
+const express = require("express");
+const { createCanvas, loadImage } = require("canvas");
 const axios = require("axios");
-const WebSocket = require("ws");
+const fetch = require("node-fetch");
 
-cleanENV();
-require("dotenv").config();
+const app = express();
+const PORT = 3000;
 
-// Check node.js version
-if (Number(process.version.slice(1).split(".")[0]) < 16) {
-    console.error(
-        "Node.js 16.0.0 or higher is required. Update Node.js on your system."
-    );
-    process.exit(1);
+// Function to fetch round information
+async function fetchRoundInfo(sessionId, roundId) {
+    console.log(sessionId, roundId);
+
+    const url = `https://rat.kajotgames.dev/api/history/v3/casinos/1/sessions/${sessionId}/rounds/${roundId}`;
+    const response = await axios.get(url);
+    console.log(response.data.math_result.reelMatrix);
+
+    if (response.status !== 200) {
+        throw new Error(`Failed to fetch round info: ${response.statusText}`);
+    }
+    return response.data;
 }
 
-// Check if BOT_TOKEN is a valid Discord Bot Token
-if (!process.env.BOT_TOKEN || process.env.BOT_TOKEN.includes(" ")) {
-    console.error(
-        'Make sure you\'ve entered the correct Environment variables in the ".env" file'
-    );
-    console.error("Reason: Invalid Discord Bot Token");
-    process.exit(1);
-}
-
-// Check if PANEL_URL is a valid URL and PANEL_KEY is a valid Pterodactyl API Key and starts with "ptlc_"
-if (
-    !process.env.PANEL_URL ||
-    !process.env.PANEL_URL.match(/^https?:\/\/[^\s$.?#].[^\s]*$/)
-) {
-    console.error(
-        'Make sure you\'ve entered the correct Environment variables in the ".env" file'
-    );
-    console.error("Reason: Invalid Panel URL");
-    process.exit(1);
-}
-
-if (!process.env.PANEL_KEY || !process.env.PANEL_KEY.startsWith("ptlc_")) {
-    console.error(
-        'Make sure you\'ve entered the correct Environment variables in the ".env" file'
-    );
-    console.error("Reason: Invalid Panel API Key");
-    process.exit(1);
-}
-
-// Check if AUTHORIZED_ROLE is a valid Discord Role ID
-if (
-    !process.env.AUTHORIZED_ROLE ||
-    !(typeof Number(process.env.AUTHORIZED_ROLE) === "number")
-) {
-    console.error(
-        'Make sure you\'ve entered the correct Environment variables in the ".env" file'
-    );
-    console.error("Reason: Invalid Authorized Role ID Key");
-    process.exit(1);
-}
-
-// Create Discord.js Bot and Nodedactyl clients
-const {
-    Client,
-    Events,
-    GatewayIntentBits,
-    Collection,
-    REST,
-    Routes,
-    codeBlock,
-    time,
-    hyperlink,
-} = require("discord.js");
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildModeration,
-    ],
-});
-
-const Nodeactyl = require("nodeactyl");
-let api;
-try {
-    api = new Nodeactyl.NodeactylClient(
-        process.env.PANEL_URL,
-        process.env.PANEL_KEY
-    );
-    (async () => {
-        const {
-            first_name: firstName,
-            last_name: lastName,
-            username,
-        } = await api.getAccountDetails();
-        console.log(
-            `Connected to Apollo as ${firstName} ${lastName} (Username: ${username})`
+async function fetchSymbolImage(gameName, symbolId) {
+    const imageUrl = `https://games.kajotgames.dev/${gameName}/expose/assets/img/${symbolId}.png`;
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+        throw new Error(
+            `Failed to fetch symbol image for ID ${symbolId}: ${response.statusText}`
         );
-    })();
-} catch (err) {
-    console.error(
-        "Something went wrong when connecting to Apollo. Try again later."
-    );
-    console.error(err);
-    process.exit(1);
+    }
+    return response.buffer(); // Returns the image as a Buffer
 }
 
-(async () => {
-    // Notify console if Discord bot successfully logs in.
-    let logGuild;
-    let logChannel;
-    await client.once(Events.ClientReady, async (c) => {
-        console.log(`Logged in as ${c.user.tag} (ID: ${c.user.id})`);
-        logGuild = await client.guilds.cache.get("981934988750618694");
-        logChannel = await logGuild.channels.cache.get("1181676734475677777");
-    });
+function transposeMatrix(matrix) {
+    const transposed = [];
+    const rows = matrix.length;
+    const cols = matrix[0].length;
 
-    const config = {
-        panelUrl: process.env.PANEL_URL,
-        pterodactylUserApiKey: process.env.PANEL_KEY,
-        serverUUID: "29562251",
-    };
-
-    async function getToken() {
-        const res = await axios
-            .get(
-                "https://control.sparkedhost.us/api/client/servers/29562251/websocket",
-                {
-                    headers: {
-                        Accept: "application/json",
-                        "Content-Type": "application/json",
-                        Authorization: "Bearer " + process.env.PANEL_KEY,
-                    },
-                }
-            )
-            .catch(function (error) {
-                console.log("catch");
-            });
-        return { token: res.data.data.token, socket: res.data.data.socket };
+    for (let col = 0; col < cols; col++) {
+        transposed[col] = [];
+        for (let row = 0; row < rows; row++) {
+            transposed[col][row] = matrix[row][col];
+        }
     }
 
-    const res = await getToken();
-    console.log(res);
-    const token = res.token;
-    const ws = new WebSocket(res.socket, { origin: process.env.PANEL_URL });
+    return transposed;
+}
 
-    ws.on("open", function open() {
-        ws.send(JSON.stringify({ event: "auth", args: [token] }));
-    });
+async function generateMatrixImage(
+    reelMatrix,
+    gameName,
+    symbolSize = 100,
+    text = "Golden Text",
+    blurAmount = 5
+) {
+    // Extract the 2D matrix from the 3D structure
+    const matrix = reelMatrix[0];
+    if (!matrix || !Array.isArray(matrix)) {
+        throw new Error("Invalid reelMatrix structure");
+    }
 
-    ws.on("message", async function message(data) {
-        const res = JSON.parse(data.toString());
-        if (res.event === "console output") {
-            logChannel?.send({ content: codeBlock("js", res.args[0]) });
-        }
-        if (res.event === "token expiring") {
-            console.log("expiring");
-            const res = await getToken();
-            const token = res.token;
-            ws.send(JSON.stringify({ event: "auth", args: [token] }));
-        }
-    });
+    const rows = reelMatrix.length;
+    const cols = reelMatrix[0].length;
 
-    ws.on("error", function error(err) {
-        console.log("err");
-    });
+    // Create a canvas large enough to fit the matrix
+    const width = cols * symbolSize;
+    const height = rows * symbolSize;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext("2d");
 
-    // Execute Slash Commands when used
-    client.on(Events.InteractionCreate, async (interaction) => {
-        if (!interaction.isChatInputCommand()) return;
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, width, height);
 
-        const command = interaction.client.commands.get(
-            interaction.commandName
-        );
+    // Apply a blur filter to the symbols (background)
+    ctx.filter = `blur(${blurAmount}px)`;
 
-        if (!command) {
-            console.error(
-                `No command matching ${interaction.commandName} was found.`
-            );
-            return;
-        }
-
-        try {
-            await command.execute(interaction);
-        } catch (error) {
-            console.error(
-                `Something went wrong when running the "${interaction.commandName}" command.`
-            );
-            console.error(error);
-            //check if interaction is deferred
-            if (interaction.deferred) {
-                //edit the original response
-                await interaction.editReply({
-                    content:
-                        "⚠️ There was an error while executing this command!",
-                    ephemeral: true,
-                });
-            } else {
-                await interaction.reply({
-                    content:
-                        "⚠️ There was an error while executing this command!",
-                    ephemeral: true,
-                });
+    // Draw the blurred symbols in the matrix
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            const symbolId = reelMatrix[row][col];
+            try {
+                const symbolBuffer = await fetchSymbolImage(gameName, symbolId);
+                const symbolImage = await loadImage(symbolBuffer);
+                const x = col * symbolSize;
+                const y = row * symbolSize;
+                ctx.drawImage(symbolImage, x, y, symbolSize, symbolSize);
+            } catch (error) {
+                console.error(
+                    `Error loading symbol ID ${symbolId}:`,
+                    error.message
+                );
+                // If an image fails to load, draw a placeholder
+                ctx.fillStyle = "gray";
+                ctx.fillRect(
+                    col * symbolSize,
+                    row * symbolSize,
+                    symbolSize,
+                    symbolSize
+                );
+                ctx.fillStyle = "white";
+                ctx.fillText(
+                    "?",
+                    col * symbolSize + symbolSize / 2 - 10,
+                    row * symbolSize + symbolSize / 2 + 10
+                );
             }
         }
-    });
-
-    // Detect ratelimit
-    client.rest.on("rateLimited", (data) => {
-        console.log("========== Bot Ratelimited ==========");
-        console.log(`Error Timestamp: ${Date.now()}`);
-        console.log("Is Global: " + data.global ? "Yes" : "No");
-        console.log("Ratelimit Data:");
-        console.log(data);
-        console.log("=====================================");
-    });
-})();
-
-// Log in to Discord using the provided bot token.
-client.login(process.env.BOT_TOKEN).then(async () => {
-    // Register Slash Commands
-    client.commands = new Collection();
-    const commands = [];
-    // Grab all the command files from the commands directory you created earlier
-    const commandFiles = fs
-        .readdirSync("./commands")
-        .filter((file) => file.endsWith(".js"));
-
-    for (const file of commandFiles) {
-        const filePath = path.join(__dirname, "commands", file);
-        const command = require(filePath);
-        if ("data" in command && "execute" in command) {
-            commands.push(command.data.toJSON());
-            client.commands.set(command.data.name, command);
-        } else {
-            console.log(
-                `[WARNING] The command at "${filePath}" is missing a required "data" and/or "execute" property.`
-            );
-        }
     }
 
-    // Construct and prepare an instance of the REST module
-    const rest = new REST({ version: "10" }).setToken(process.env.BOT_TOKEN);
+    // Now reset the filter to avoid blurring the square and text
+    ctx.filter = "none";
+
+    const squareX = 0;
+    const squareY = 0;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+    ctx.fillRect(squareX, squareY, width, height);
+
+    // Add golden text in the center of the matrix (above the square and symbols)
+    const fontSize = 80;
+    ctx.font = `bold ${fontSize}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // Create a golden gradient for the text
+    const gradient = ctx.createLinearGradient(0, 0, width, 0);
+    gradient.addColorStop(0, "#FFD700"); // Gold
+    gradient.addColorStop(0.3, "#FFEC8B"); // Light gold
+    gradient.addColorStop(0.5, "#FFD700"); // Gold
+    gradient.addColorStop(0.7, "#FFA500"); // Dark gold
+    gradient.addColorStop(1, "#FFD700"); // Gold
+    ctx.fillStyle = gradient;
+
+    // Draw the golden text
+    ctx.fillStyle = gradient;
+    ctx.fillText(text, width / 2, height / 2);
+
+    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+    ctx.shadowOffsetX = 4;
+    ctx.shadowOffsetY = 4;
+    ctx.shadowBlur = 10;
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#B8860B"; // Dark gold outline
+    ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+
+    return canvas.toBuffer(); // Return the matrix image as a buffer
+}
+
+app.get("/generate-image", async (req, res) => {
+    const { sessionId, roundId, gameName } = req.query;
+
+    if (!sessionId || !roundId || !gameName) {
+        return res
+            .status(400)
+            .send("Missing required parameters: sessionId, roundId, gameName");
+    }
+
     try {
-        console.log(
-            `Started refreshing ${commands.length} application (/) commands.`
+        // Fetch round info
+        const roundInfo = await fetchRoundInfo(sessionId, roundId);
+        const reelMatrix = transposeMatrix(
+            roundInfo.math_result?.reelMatrix[0]
         );
 
-        // The put method is used to fully refresh all commands in the guild with the current set
-        const data = await rest.put(
-            // Routes.applicationCommands(client.application.id),
-            Routes.applicationGuildCommands(
-                client.application.id,
-                process.env.SERVER_ID
-            ),
-            { body: commands }
+        if (!reelMatrix) {
+            return res
+                .status(400)
+                .send("Round data does not contain a reelMatrix");
+        }
+        console.log(roundInfo);
+
+        // Generate the symbol matrix image
+        const imageBuffer = await generateMatrixImage(
+            reelMatrix,
+            gameName,
+            undefined,
+            Number(roundInfo.win).toLocaleString("en")
         );
 
-        console.log(
-            `Successfully reloaded ${data.length} application (/) commands.`
-        );
-    } catch (err) {
-        console.error(
-            "Something went wrong when registering the Slash Commands. Try again later."
-        );
-        console.error(err);
-        process.exit(1);
+        // Send the generated image as the response
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(imageBuffer);
+    } catch (error) {
+        console.error("Error:", error.message);
+        res.status(500).send(`Error generating image: ${error.message}`);
     }
 });
 
-// Function to trim the values of Environment Variables in the .env file
-function cleanENV() {
-    // Read the contents of the .env file as a stream
-    const stream = fs.readFileSync(".env", "utf8");
-
-    // Split the stream into an array of lines
-    const lines = stream.split("\n");
-
-    let output = "";
-    // Iterate through the lines of the file
-    for (let line of lines) {
-        // Check if the line is an Environment Variable
-        if (line.match(/[a-zA-Z,_,-]+\s*=\s*"(.+)"$/m)) {
-            // Trim value of the Environment Variable
-            const value = line.slice(line.indexOf("=") + 1).slice(1, -1);
-            line = line.replace(`"${value}"`, `"${value.trim()}"`);
-        }
-        // Add the modified line to the output string
-        output += line;
-
-        if (line !== lines[lines.length - 1]) {
-            output += "\n";
-        }
-    }
-
-    // Write the modified contents back to the .env file
-    fs.writeFileSync(".env", output);
-}
-
-module.exports = { api };
+// Start the server
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+});
